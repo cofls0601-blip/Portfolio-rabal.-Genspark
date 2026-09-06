@@ -497,3 +497,89 @@ elif page == '설정':
     if st.button('🗑 가격 캐시 삭제'):
         DataManager.clear_price_cache()
         st.success('캐시를 삭제했습니다.')
+
+# app.py의 설정 페이지 부분
+
+elif page == '설정':
+    st.header('설정')
+    st.caption('데이터 백업 & 복원')
+    
+    st.divider()
+    st.subheader('📊 데이터 위치')
+    st.info(f"**로컬 저장 위치**: `{DataManager.get_data_file_path()}`")
+    st.caption("이 파일이 모든 데이터를 담고 있습니다. 이 폴더를 주기적으로 백업하세요!")
+    
+    st.divider()
+    st.subheader('💾 데이터 다운로드')
+    st.caption("현재 모든 데이터를 JSON으로 다운로드합니다. **리밸런싱 후 매달 이것을 다운로드하세요!**")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        json_data = DataManager.export_json()
+        st.download_button(
+            label='📥 데이터 다운로드 (JSON)',
+            data=json_data,
+            file_name=f'portfolio_{datetime.now().strftime("%Y%m%d")}.json',
+            mime='application/json',
+            help='현재 상태를 안전한 곳에 저장하세요'
+        )
+    
+    with col2:
+        csv_data = pd.DataFrame(DataManager.get_state('history', [])).to_csv(index=False)
+        st.download_button(
+            label='📊 히스토리 다운로드 (CSV)',
+            data=csv_data,
+            file_name=f'history_{datetime.now().strftime("%Y%m%d")}.csv',
+            mime='text/csv'
+        )
+    
+    st.divider()
+    st.subheader('📤 데이터 업로드 (복원)')
+    st.caption("**규칙을 수정한 JSON을 여기 업로드하면 적용됩니다.**")
+    
+    uploaded_file = st.file_uploader(
+        '파일 선택',
+        type='json',
+        help='portfolio_YYYYMMDD.json 형식의 파일'
+    )
+    
+    if uploaded_file is not None:
+        st.warning('⚠️ 업로드하면 현재 데이터가 덮어씌워집니다! 확인하세요.')
+        
+        if st.button('✅ 이 파일로 복원하기', type='primary'):
+            success = DataManager.import_json(uploaded_file.read())
+            if success:
+                st.success('✓ 데이터가 복원되었습니다!')
+                st.rerun()
+            else:
+                st.error('❌ 복원에 실패했습니다. 파일 형식을 확인하세요.')
+    
+    st.divider()
+    st.subheader('🔄 백업 히스토리')
+    st.caption("자동으로 생성된 백업 파일 목록입니다.")
+    
+    backups = DataManager.get_archive_files()
+    if backups:
+        for backup_file in backups[:10]:  # 최근 10개
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.text(backup_file)
+            with col2:
+                if st.button('복원', key=f'restore_{backup_file}', use_container_width=True):
+                    if DataManager.restore_from_archive(backup_file):
+                        st.success(f'✓ {backup_file}에서 복원됨')
+                        st.rerun()
+                    else:
+                        st.error('복원 실패')
+    else:
+        st.caption('아직 백업이 없습니다.')
+    
+    st.divider()
+    st.subheader('📋 시스템 정보')
+    
+    data = DataManager._load_json()
+    st.metric('전략 수', len(data.get('strategies', [])))
+    st.metric('히스토리 기록', len(data.get('history', [])))
+    st.metric('마지막 업데이트', data.get('last_updated', '-'))
+
