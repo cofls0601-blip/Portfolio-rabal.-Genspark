@@ -1,0 +1,13 @@
+v14.2 안정화 배포본
+- asset_allocation_app.py: DateInput/FileUploader/DownloadButton 제거
+- 날짜 입력: YYYY-MM-DD 텍스트
+- JSON/CSV: 직접 붙여넣기
+- 다운로드: 기본 HTML data URL
+- 외부 폰트 CDN 제거
+- SQLite KV 손상 quarantine + 기본값 복구
+- account_cash None 방어
+- requirements.txt에서 Streamlit 버전 고정
+테스트:
+  python -m py_compile asset_allocation_app.py strategy_engine.py test_regression.py test_stability.py
+  python test_stability.py
+  python test_regression.py
