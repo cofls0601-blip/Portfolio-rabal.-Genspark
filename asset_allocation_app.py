@@ -295,69 +295,6 @@ def put_state(k, v):
 # st.cache_data와 SQLite 캐시가 서로 다른 층이기 때문에 발생할 수 있다.
 PRICE_CACHE_TTL_SECONDS = 60 * 60 * 24 * 30
 
-# ---------- [v16] 매일 쓰는 4가지 마찰 해소 (안정성 패치) ----------
-# 1) sqlite 잠금 race: Streamlit rerun은 별도 스레드에서 페이지를 실행할 수 있어 connect엔 check_same_thread=False가 안전하고,
-#    빠른 연속 rerun으로 "database is locked" 같은 일시적 lock이 뜨는 케이스를 1회 자동 재시도로 흡수한다.
-#    기존 호출자(13곳)는 그대로 둠 — 새 헬퍼는 곧장 호환되며 stage-by-stage로 치환된다.
-from contextlib import contextmanager
-import time as _time
-@contextmanager
-def connect_db():
-    try:
-        con = sqlite3.connect(DB_PATH, timeout=15, check_same_thread=False)
-        yield con
-        try: con.commit()
-        except Exception: pass
-        con.close()
-        return
-    except sqlite3.OperationalError as _e:
-        if 'locked' in str(_e).lower():
-            _time.sleep(0.4)
-            con = sqlite3.connect(DB_PATH, timeout=15, check_same_thread=False)
-            try:
-                yield con
-                con.commit()
-            finally:
-                try: con.close()
-                except Exception: pass
-            return
-        raise
-
-# 4) 광범위 except Exception 분류 — 빈 df는 silent, 손상은 메시지
-# _safe_call은 "실패해도 치명적이지 않은 호출"에만 사용한다. 결과는 항상 bool.
-_LAST_WARN_TS = {}
-def _safe_call(label, fn):
-    """v16 — except Exception 의 일관성 있는 대체.
-    - label: 어느 호출인지 식별 (콘솔/배너 확인용)
-    - fn: 실행할 zero-arg 호출 또는 no-arg callable
-    - Ok False: fn 이 None / pd.isna / '0' / empty string 등을 '값이 없음'으로 정상 처리한 경우
-    - Err True: 위 미만 — 콘솔에 상세 기록, 화면에는 비침묵(첫 1회만)
-    단순 의도: '조용히 무시'도 '엄격히 죽음'도 사용자 둘 다 불만이라, **첫 실패만 가볍게 알려주고 나머지는 조용히** 한다.
-    """
-    try:
-        out = fn() if callable(fn) else fn
-        if out is None: return None, False
-        try:
-            if pd.isna(out): return None, False
-        except (TypeError, ValueError): pass
-        if isinstance(out, pd.DataFrame) and out.empty: return None, False
-        if isinstance(out, (list, tuple, dict, str)) and len(out) == 0: return None, False
-        return out, False
-    except Exception as e:
-        import traceback
-        ts = _time.time()
-        if _LAST_WARN_TS.get(label, 0) < ts - 30:
-            _LAST_WARN_TS[label] = ts
-            print(f'[safe_call:{label}] {type(e).__name__}: {e}')
-        return None, True
-
-def _since_last_fetch():
-    """[v16] 가격 캐시/마지막 조회 신선도를 일 단위로 표시."""
-    d = st.session_state.get('last_run_date')
-    if not d: return None
-    try: return (date.today() - pd.Timestamp(d).date()).days
-    except Exception: return None
-
 def _cache_market_ticker(market, ticker):
     market = str(market or 'KR').upper(); ticker = str(ticker).strip()
     return market, (kr6(ticker) if market == 'KR' else ticker.upper())
@@ -1878,16 +1815,6 @@ if page == '🔄 리밸런싱 실행':
     _sc1.metric('활성 전략 총자산', w(_g))
     _sc2.metric('마지막 히스토리 저장', info[0] if info else '없음')
     _sc3.metric('이번 달 말까지', f'{calendar.monthrange(date.today().year, date.today().month)[1] - date.today().day}일')
-    # [v16] 가격 신선도 표시 — 'last_run_date'가 3일 이상 지났으면 새로고침 권장 픽스로 전환
-    _fresh = _since_last_fetch()
-    if _fresh is not None:
-        if _fresh == 0: st.caption('✅ 오늘 가격을 이미 조회했습니다.')
-        elif _fresh < 3: st.caption(f'📅 마지막 가격 조회: 오늘 포함 {_fresh}일 전')
-        else:
-            _stale_warn = st.session_state.pop('_stale_prices_warning_shown', False)
-            if not _stale_warn:
-                st.session_state._stale_prices_warning_shown = True
-            st.warning(f'⚠️ 마지막 가격 조회로부터 {_fresh}일 경과 — 새로고침 권장 (오래된 가격으로 저장 시 히스토리가 왜곡됩니다).')
     st.info('종가를 불러온 뒤 저장 버튼을 눌러야 히스토리(모든 전략 구성 스냅샷)가 저장됩니다. 미국 상장 종목은 선택한 조회일자의 Yahoo 종가와 같은 날짜의 USD/KRW 환율로 원화 환산합니다.')
     if st.session_state.get('price_fetch_attempted') and usd_krw_rate_missing(ap_assets, run_date):
         st.warning('미국 상장 종목의 선택 조회일자 USD/KRW 환율을 가져오지 못했습니다. 해당 종목 평가액이 0으로 계산될 수 있습니다.')
@@ -1978,50 +1905,7 @@ if page == '🔄 리밸런싱 실행':
     failed_idx = st.session_state.get('failed_tickers', [])
     failed_idx = [i for i in failed_idx if i in assets.index]
     if failed_idx:
-        # [v16] 일괄 재시도 — 8개 빨간 줄일 때 8번 누르던 마찰 해소
-        _ticker_labels = ', '.join(str(assets.at[i, 'ticker']) for i in failed_idx[:8])
-        if len(failed_idx) > 8: _ticker_labels += f' 외 {len(failed_idx) - 8}개'
-        st.error(f'🛑 가격 조회 실패 {len(failed_idx)}종목 — {_ticker_labels}')
-        if st.button('🔁 실패 종목 전체 재시도 (캐시 초기화 + 재조회)', key='v16_retry_all_failed', type='primary', width='stretch'):
-            _retry_ok, _retry_err, _still_failed = 0, [], []
-            try: st.cache_data.clear()
-            except Exception: pass
-            try: clear_all_price_caches()
-            except Exception: pass
-            for _i in failed_idx:
-                _t = str(assets.at[_i, 'ticker']).strip()
-                _mkt = assets.at[_i, 'market'] or 'KR'
-                try:
-                    if _mkt == 'US':
-                        try:
-                            st.session_state.run_fx_rate = get_usd_krw_rate(run_date.isoformat(), force_refresh=True)
-                        except Exception: pass
-                        _daydf = fetch_price_day(_mkt, source, _t, run_date.isoformat(), force_refresh=True)
-                    else:
-                        _daydf = fetch_price_day(_mkt, source, _t, run_date.isoformat(), force_refresh=True)
-                    _row = _daydf.iloc[-1]
-                    assets.at[_i, 'close'] = float(_row['close'])
-                    if 'adjclose' in _row and n(_row.get('adjclose')) > 0:
-                        assets.at[_i, 'adjclose'] = float(n(_row['adjclose']))
-                    assets.at[_i, 'last_fetch_date'] = run_date.isoformat()
-                    assets.at[_i, 'price_source'] = source
-                    _monthly = fetch_price_monthly(_mkt, source, _t, run_date.isoformat(), force_refresh=True)
-                    _prices = _monthly.sort_values('date')['close'].tolist() if not _monthly.empty else [float(_row['close'])]
-                    assets.at[_i, 'prices'] = _prices
-                    if len(_prices) >= 10:
-                        _retry_ok += 1
-                    else:
-                        _retry_err.append(f'{_t}: {_prices}월만 확보')
-                        _still_failed.append(_i)
-                except Exception as _e:
-                    _retry_err.append(f'{_t}: {str(_e)[:80]}')
-                    _still_failed.append(_i)
-            st.session_state.assets = assets; put_state('assets', assets.to_dict('records'))
-            st.session_state.failed_tickers = _still_failed
-            if _retry_ok: st.success(f'✅ {_retry_ok}종목 복구 — 실패 잔여 {len(_still_failed)}건')
-            if _retry_err: st.warning(' / '.join(_retry_err[:5]))
-            st.rerun()
-        with st.expander(f'⚠️ 종가 조회 실패/데이터 부족 {len(failed_idx)}건 (개별 수동 입력 또는 행 단위 재시도)', expanded=False):
+        with st.expander(f'⚠️ 종가 조회 실패/데이터 부족 {len(failed_idx)}건', expanded=False):
             st.caption('상세 오류와 원인을 확인할 수 있습니다. 수동 종가 입력은 자동 조회가 끝내 실패할 때의 비상 수단입니다.')
             for i in failed_idx:
                 a = assets.loc[i]
