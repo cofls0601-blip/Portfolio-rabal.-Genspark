@@ -94,6 +94,22 @@ textarea {
 .history-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:13px;margin:8px 0;box-shadow:0 1px 2px rgba(15,23,42,.03);}
 .history-date{font-weight:750;color:var(--text);}
 .history-sub{font-size:.78rem;color:var(--muted);margin-top:3px;}
+/* [v17] 색 토큰 + 신선도 pill + 결정 카드 + step meter */
+:root{--tone-info:#4A6FA5;--tone-info-bg:rgba(74,111,165,.10);--tone-pos:#6E8A5B;--tone-pos-bg:rgba(110,138,91,.12);--tone-warn:#C1795A;--tone-warn-bg:rgba(193,121,90,.12);--tone-crit:#B23B2E;--tone-crit-bg:rgba(178,59,46,.12);}
+.freshness-pill{display:inline-flex;gap:6px;align-items:center;padding:4px 10px;border-radius:999px;font-size:.78rem;font-weight:650;letter-spacing:-0.01em;border:1px solid transparent;}
+.fp-ok{background:var(--tone-pos-bg);color:var(--tone-pos);border-color:rgba(110,138,91,.35);}
+.fp-fresh{background:var(--tone-info-bg);color:var(--tone-info);border-color:rgba(74,111,165,.30);}
+.fp-stale{background:var(--tone-warn-bg);color:var(--tone-warn);border-color:rgba(193,121,90,.35);}
+.fp-critical{background:var(--tone-crit-bg);color:var(--tone-crit);border-color:rgba(178,59,46,.40);}
+.decision-card{margin:10px 0 14px;border-radius:14px;padding:14px 16px;border:1px solid var(--border);background:var(--surface);box-shadow:0 1px 2px rgba(15,23,42,.04);}
+.decision-card .head{display:flex;justify-content:space-between;gap:10px;align-items:center;font-weight:750;letter-spacing:-0.02em;}
+.decision-card .act-buy{color:var(--tone-pos);font-weight:750;}
+.decision-card .act-sell{color:var(--tone-crit);font-weight:750;}
+.decision-card .meta{font-size:.82rem;color:var(--muted);margin-top:5px;display:flex;flex-wrap:wrap;gap:10px;}
+.step-meter{display:flex;gap:6px;margin:6px 0 4px;}
+.step-meter .seg{height:6px;flex:1;border-radius:999px;background:#e9e2cf;}
+.step-meter .seg.on{background:linear-gradient(90deg,var(--tone-info),var(--tone-pos));}
+.step-meter .lbl{font-size:.72rem;color:var(--muted);margin:0 0 8px;letter-spacing:-.01em;}
 /* Modern typography / controls */
 .stButton > button,  .stButton > button {
     font-family: var(--app-font) !important;
@@ -131,9 +147,84 @@ DB_PATH = secret('SQLITE_PATH', _default_db_path)
 
 CATEGORY_OPTIONS = ['현금', '금', '선진국 주식', '신흥국 주식', '선진국 채권', '신흥국 채권', '기타']
 YAHOO_HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-APP_VERSION = '15.1'
+APP_VERSION = '17.0'
 KR_API_TIMEOUT = 6
 YAHOO_API_TIMEOUT = 10
+
+# ---------- [v17] UI 헬퍼: 팔레트·톤 배너·메트릭 delta·신선도 pill·plotly 차트 ----------
+PALETTE = ['#6E8A5B','#C1795A','#7D7A4F','#4A6FA5','#A15E42','#4A4638','#8DA377','#B23B2E']
+TONES = {'info':('#4A6FA5','rgba(74,111,165,.10)'),'positive':('#6E8A5B','rgba(110,138,91,.12)'),
+         'warning':('#C1795A','rgba(193,121,90,.12)'),'critical':('#B23B2E','rgba(178,59,46,.12)')}
+
+def _tone_banner(content, tone='info'):
+    fg, bg = TONES.get(tone, TONES['info'])
+    st.markdown(f'<div style="border-left:4px solid {fg};background:{bg};border-radius:8px;padding:10px 14px;margin:6px 0;color:#3D3A2E;letter-spacing:-0.01em;">{content}</div>', unsafe_allow_html=True)
+
+def make_freshness_pill(days_old):
+    if days_old is None:    return '<span class="freshness-pill fp-fresh">⏱ 조회 이력 없음</span>'
+    if days_old == 0:       return '<span class="freshness-pill fp-ok">✅ 오늘 조회</span>'
+    if days_old < 3:        return f'<span class="freshness-pill fp-fresh">📅 {days_old}일 전</span>'
+    if days_old < 7:        return f'<span class="freshness-pill fp-stale">⚠️ {days_old}일 전 — 새로고침 권장</span>'
+    return f'<span class="freshness-pill fp-critical">🛑 {days_old}일 전 — 데이터 매우 오래됨</span>'
+
+def make_decision_card(headline, severity, action_label=None, items=None):
+    fg = {'buy':'#6E8A5B','sell':'#B23B2E','watch':'#C1795A','ok':'#4A6FA5'}.get(severity,'#4A6FA5')
+    cls = 'act-buy' if severity=='buy' else ('act-sell' if severity=='sell' else '')
+    act = f'<span class="{cls}">{action_label}</span>' if action_label else ''
+    items_html = ''.join(f'<span>· {it}</span>' for it in (items or []))
+    return f'<div class="decision-card" style="border-left:6px solid {fg};"><div class="head"><span>{headline}</span>{act}</div><div class="meta">{items_html}</div></div>'
+
+def _step_meter(steps_total, steps_done, labels=None):
+    segs = ''.join('<div class="seg ' + ('on' if i < steps_done else '') + '"></div>' for i in range(steps_total))
+    html = ['<div class="step-meter">' + segs + '</div>']
+    if labels:
+        try:
+            lbls_rendered = ''
+            for i in range(steps_total):
+                t = labels[i] if i < len(labels) else ''
+                style = 'font-weight:750;color:#6E8A5B' if i == steps_done - 1 else 'color:#8a8577'
+                lbls_rendered += f'<span style="{style};margin-right:14px;">{i+1}{t}</span>'
+            html.append(f'<div class="step-meter lbl">{lbls_rendered}</div>')
+        except Exception:
+            pass
+    return ''.join(html)
+
+def _get_prev_total():
+    eq = get_state('equity')
+    if not eq: return None
+    today_iso = date.today().isoformat()
+    valid = [e for e in eq if e.get('date') and str(e.get('date')) < today_iso]
+    if not valid: return None
+    valid.sort(key=lambda e: str(e.get('date')))
+    return float(valid[-1].get('value', 0))
+
+try:
+    import plotly.graph_objects as _go
+    _HAS_PLOTLY = True
+except Exception:
+    _HAS_PLOTLY = False
+
+def _plotly_bar_pct(df, x_col, y_col, palette_idx=0, height=300):
+    if not _HAS_PLOTLY or df is None or df.empty: return None
+    color = PALETTE[palette_idx % len(PALETTE)]
+    fig = _go.Figure(_go.Bar(x=df[x_col], y=df[y_col], marker_color=color,
+                             hovertemplate='%{x}<br>%{y:,.1f}%<extra>%{fullData.name}</extra>'))
+    fig.update_layout(height=height, margin=dict(l=10,r=10,t=30,b=10),
+                      paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                      font=dict(family='Apple SD Gothic Neo, Malgun Gothic, sans-serif'),
+                      yaxis=dict(ticksuffix='%'))
+    return fig
+
+def _plotly_pie(df, label_col, value_col, height=320):
+    if not _HAS_PLOTLY or df is None or df.empty: return None
+    fig = _go.Figure(_go.Pie(labels=df[label_col], values=df[value_col],
+                              marker=dict(colors=PALETTE), hole=0.45,
+                              hovertemplate='%{label}<br>%{value:,.0f}원 (%{percent})<extra></extra>'))
+    fig.update_layout(height=height, margin=dict(l=10,r=10,t=30,b=10),
+                      paper_bgcolor='rgba(0,0,0,0)', showlegend=True,
+                      legend=dict(orientation='h', yanchor='bottom', y=-.18))
+    return fig
+
 
 # ---------- Safe data normalization ----------
 def safe_prices(value, fallback=None):
@@ -1700,6 +1791,18 @@ with st.sidebar:
     device_mode = st.radio('화면 모드', ['자동(반응형)', '💻 PC', '📱 모바일'], index=0, key='device_mode', horizontal=True)
     dark_mode = st.toggle('🌙 다크모드', value=False, key='dark_mode', help='눈이 편한 어두운 테마로 전환합니다.')
     st.caption('자동주문 없음 · 지정일 실행만 저장')
+    # [v17] 사이드바 미니 메트릭 — 활성 전략별 한도 잔여
+    try:
+        _mini = ''
+        for _sc in [c for c in get_strategies() if c.get('active', True)]:
+            _lim = n(_sc.get('annual_limit', 0))
+            _ytd = ytd_contribution(_sc['code']) if _lim > 0 else 0
+            _remain = _lim - _ytd if _lim > 0 else None
+            _tip = '한도 추적 안 함' if _remain is None else (f'잔여 {w(_remain)}' + (' ⚠️ 초과' if _remain < 0 else ''))
+            _mini += f'<div style="background:rgba(255,255,255,.55);border:1px solid var(--border);border-radius:8px;padding:6px 9px;margin:5px 0;font-size:.74rem;color:var(--muted);"><b style="color:var(--text);font-size:.85rem;">{_sc["code"]}</b> · {_tip}</div>'
+        if _mini: st.markdown(_mini, unsafe_allow_html=True)
+    except Exception:
+        pass
 
 # '자동' 모드도 CSS 미디어쿼리로 실제 폰 브라우저 폭에서는 반응형으로 줄어든다.
 # '📱 모바일'을 명시적으로 고르면 PC 화면에서도 강제로 모바일 레이아웃(카드형 목록 등)을 미리 볼 수 있다.
@@ -1878,17 +1981,28 @@ if page == '🔄 리밸런싱 실행':
     _sc1.metric('활성 전략 총자산', w(_g))
     _sc2.metric('마지막 히스토리 저장', info[0] if info else '없음')
     _sc3.metric('이번 달 말까지', f'{calendar.monthrange(date.today().year, date.today().month)[1] - date.today().day}일')
-    # [v16] 가격 신선도 표시 — 'last_run_date'가 3일 이상 지났으면 새로고침 권장 픽스로 전환
+    # [v17①] 전기 대비 총자산 변화 캡션 (고정 색 토큰 사용)
+    try:
+        _prev_t = _get_prev_total()
+        if _prev_t and _prev_t > 0 and _g:
+            _dp = (_g - _prev_t) / _prev_t * 100.0
+            _col = '#6E8A5B' if _dp >= 0 else '#B23B2E'
+            _arrow = '▲' if _dp >= 0 else '▼'
+            st.markdown(f'<div style="font-size:.82rem;color:{_col};font-weight:650;letter-spacing:-0.01em;margin:-2px 0 4px;">{_arrow} 저번달 대비 {_g - _prev_t:+,.0f}원 ({_dp:+.2f}%)</div>', unsafe_allow_html=True)
+    except Exception:
+        pass
+    # [v17②] 가격 신선도 pill (4단계 톤 — immediate/info/warn/critical)
+    st.markdown(make_freshness_pill(_since_last_fetch()), unsafe_allow_html=True)
     _fresh = _since_last_fetch()
-    if _fresh is not None:
-        if _fresh == 0: st.caption('✅ 오늘 가격을 이미 조회했습니다.')
-        elif _fresh < 3: st.caption(f'📅 마지막 가격 조회: 오늘 포함 {_fresh}일 전')
-        else:
-            _stale_warn = st.session_state.pop('_stale_prices_warning_shown', False)
-            if not _stale_warn:
-                st.session_state._stale_prices_warning_shown = True
-            st.warning(f'⚠️ 마지막 가격 조회로부터 {_fresh}일 경과 — 새로고침 권장 (오래된 가격으로 저장 시 히스토리가 왜곡됩니다).')
-    st.info('종가를 불러온 뒤 저장 버튼을 눌러야 히스토리(모든 전략 구성 스냅샷)가 저장됩니다. 미국 상장 종목은 선택한 조회일자의 Yahoo 종가와 같은 날짜의 USD/KRW 환율로 원화 환산합니다.')
+    if _fresh is not None and _fresh >= 3:
+        _tone_banner(f'<b>{_fresh}일 경과</b> · 오래된 가격으로 저장하면 히스토리가 왜곡됩니다. 아래에서 🔄 새로고침 후 저장하세요.', tone='warning')
+    _tone_banner('종가를 불러온 뒤 저장 버튼을 눌러야 히스토리(모든 전략 구성 스냅샷)가 저장됩니다. 미국 상장 종목은 선택한 조회일자의 Yahoo 종가와 같은 날짜의 USD/KRW 환율로 원화 환산합니다.', tone='info')
+    # [v17③] step meter — 월말 워크플로우 시각화
+    _step_done = 0
+    if _fresh is not None and _fresh < 3: _step_done = 1
+    if st.session_state.get('price_fetch_attempted'): _step_done = max(_step_done, 2)
+    if info and info[1] < 25: _step_done = max(_step_done, 3)
+    st.markdown(_step_meter(4, _step_done, ['. 가격 조회', '. 리밸런싱 계획', '. 히스토리 저장', '. 다음 달']), unsafe_allow_html=True)
     if st.session_state.get('price_fetch_attempted') and usd_krw_rate_missing(ap_assets, run_date):
         st.warning('미국 상장 종목의 선택 조회일자 USD/KRW 환율을 가져오지 못했습니다. 해당 종목 평가액이 0으로 계산될 수 있습니다.')
 
@@ -2367,7 +2481,16 @@ elif page == '🏠 대시보드':
                         render_target_weight_bar(r['현재비중'], r['목표비중'])
         st.divider(); st.markdown('#### 전략별 비중 (전체 자산 대비)')
         by_strategy = snap_df.groupby('전략')['현재금액'].sum()
-        if grand_total > 0: st.bar_chart((by_strategy / grand_total * 100).rename('비중(%)'))
+        if grand_total > 0:
+            _b = (by_strategy / grand_total * 100).rename('비중(%)').round(2)
+            if MOBILE or not _HAS_PLOTLY:
+                st.bar_chart(_b)
+            else:
+                _pdf = _b.reset_index()
+                _pdf.columns = ['전략','비중(%)']
+                _pf = _plotly_bar_pct(_pdf, '전략', '비중(%)', palette_idx=0)
+                if _pf is not None: st.plotly_chart(_pf, use_container_width=True)
+                else: st.bar_chart(_b)
 
         st.divider(); st.markdown('#### 전체 전략 합산 · 자산분류별 분포')
         cat_df = compute_category_breakdown(assets)
@@ -2393,7 +2516,13 @@ elif page == '🏠 대시보드':
             disp_cat['목표비중'] = disp_cat['목표비중'].map(lambda x: f'{x:.1f}%')
             disp_cat['괴리(%p)'] = disp_cat['괴리(%p)'].map(lambda x: f'{x:+.1f}')
             st.dataframe(disp_cat, width='stretch', hide_index=True)
-            st.bar_chart(cat_df.set_index('분류')['비중'])
+            _nonzero = cat_df[cat_df['비중'] > 0] if '비중' in cat_df.columns else cat_df
+            if MOBILE or not _HAS_PLOTLY or _nonzero.empty:
+                st.bar_chart(cat_df.set_index('분류')['비중'])
+            else:
+                _pf = _plotly_pie(_nonzero, '분류', '비중')
+                if _pf is not None: st.plotly_chart(_pf, use_container_width=True)
+                else: st.bar_chart(cat_df.set_index('분류')['비중'])
             worst = show.reindex(show['괴리(%p)'].abs().sort_values(ascending=False).index).head(3)
             flagged = worst[worst['괴리(%p)'].abs() >= 3]
             if not flagged.empty:
@@ -2598,7 +2727,7 @@ elif page == '⚙️ 설정':
     st.markdown('### 종목 검색·추가 (ETF + 개별주식, 한국/미국)')
     mkt_choice = st.radio('시장', ['한국(KRX)', '미국(Yahoo)'], horizontal=True, key='mkt_choice')
     if mkt_choice == '한국(KRX)':
-        q = st.text_input('티커 또는 종목명 일부 입력', key='kr_q')
+        q = st.text_input('티커 또는 종목명 일부 입력', key='v17_action_krq')
         catalog = load_krx_universe(date.today().isoformat())
         if catalog.empty:
             err = catalog.attrs.get('error', '알 수 없는 이유로 목록을 가져오지 못했습니다.')
@@ -2624,7 +2753,7 @@ elif page == '⚙️ 설정':
             st.caption('티커 또는 종목명을 입력하면 후보가 바로 아래 나타납니다.')
         st.caption(f'KRX 목록 {len(catalog):,}개 (ETF는 이미 설정된 KRX_AUTH_KEY로 조회, 개별종목은 pykrx 보강 시도)')
     else:
-        q = st.text_input('종목명 또는 티커 입력 (예: Apple, AAPL)', key='us_q')
+        q = st.text_input('종목명 또는 티커 입력 (예: Apple, AAPL)', key='v17_search_usq')
         if st.button('검색', key='us_search') and q:
             st.session_state.us_results = search_us_symbols(q)
         results = st.session_state.get('us_results', pd.DataFrame(columns=['ticker', 'name', 'exchange']))
