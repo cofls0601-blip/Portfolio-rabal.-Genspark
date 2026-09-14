@@ -1,4 +1,4 @@
-import json, sqlite3, re, calendar, base64
+import json, sqlite3, re, calendar, math, base64
 from datetime import date
 from pathlib import Path
 import pandas as pd
@@ -94,6 +94,32 @@ textarea {
 .history-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:13px;margin:8px 0;box-shadow:0 1px 2px rgba(15,23,42,.03);}
 .history-date{font-weight:750;color:var(--text);}
 .history-sub{font-size:.78rem;color:var(--muted);margin-top:3px;}
+/* [v18] kb-hint + tooltip-bar + dup-warn + undo-pill */
+.kb-hint{background:#F4EFE6;border:1px solid #E6DECC;border-radius:10px;padding:8px 12px;font-size:.78rem;color:#6b675a;margin:6px 0 10px;letter-spacing:-.01em;}
+.kb-hint kbd{background:#fff;border:1px solid #d6cfb8;border-radius:4px;padding:1px 6px;font-size:.72rem;margin:0 2px;color:#4A4638;font-family:monospace;}
+.editor-tooltip{background:#FBF7EE;border:1px solid #E6DECC;border-radius:10px;padding:8px 10px;margin:8px 0 4px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;}
+.editor-tooltip .label{font-size:.78rem;color:#8a8577;font-weight:650;letter-spacing:-.01em;margin-right:4px;}
+.editor-tooltip kbd{background:#fff;border:1px solid #d6cfb8;border-radius:4px;padding:1px 6px;font-size:.7rem;color:#4A4638;font-family:monospace;}
+.dup-warn{background:rgba(178,59,46,.10);border-left:4px solid #B23B2E;border-radius:8px;padding:8px 12px;font-size:.82rem;color:#7a1e16;margin:6px 0;letter-spacing:-.01em;}
+.dup-warn b{color:#B23B2E;}
+.undo-stack-pill{display:inline-flex;gap:6px;padding:3px 9px;border-radius:999px;font-size:.72rem;font-weight:650;background:rgba(74,111,165,.10);color:#4A6FA5;border:1px solid rgba(74,111,165,.30);margin-left:6px;}
+
+/* [v17] 색 토큰 + 신선도 pill + 결정 카드 + step meter */
+:root{--tone-info:#4A6FA5;--tone-info-bg:rgba(74,111,165,.10);--tone-pos:#6E8A5B;--tone-pos-bg:rgba(110,138,91,.12);--tone-warn:#C1795A;--tone-warn-bg:rgba(193,121,90,.12);--tone-crit:#B23B2E;--tone-crit-bg:rgba(178,59,46,.12);}
+.freshness-pill{display:inline-flex;gap:6px;align-items:center;padding:4px 10px;border-radius:999px;font-size:.78rem;font-weight:650;letter-spacing:-0.01em;border:1px solid transparent;}
+.fp-ok{background:var(--tone-pos-bg);color:var(--tone-pos);border-color:rgba(110,138,91,.35);}
+.fp-fresh{background:var(--tone-info-bg);color:var(--tone-info);border-color:rgba(74,111,165,.30);}
+.fp-stale{background:var(--tone-warn-bg);color:var(--tone-warn);border-color:rgba(193,121,90,.35);}
+.fp-critical{background:var(--tone-crit-bg);color:var(--tone-crit);border-color:rgba(178,59,46,.40);}
+.decision-card{margin:10px 0 14px;border-radius:14px;padding:14px 16px;border:1px solid var(--border);background:var(--surface);box-shadow:0 1px 2px rgba(15,23,42,.04);}
+.decision-card .head{display:flex;justify-content:space-between;gap:10px;align-items:center;font-weight:750;letter-spacing:-0.02em;}
+.decision-card .act-buy{color:var(--tone-pos);font-weight:750;}
+.decision-card .act-sell{color:var(--tone-crit);font-weight:750;}
+.decision-card .meta{font-size:.82rem;color:var(--muted);margin-top:5px;display:flex;flex-wrap:wrap;gap:10px;}
+.step-meter{display:flex;gap:6px;margin:6px 0 4px;}
+.step-meter .seg{height:6px;flex:1;border-radius:999px;background:#e9e2cf;}
+.step-meter .seg.on{background:linear-gradient(90deg,var(--tone-info),var(--tone-pos));}
+.step-meter .lbl{font-size:.72rem;color:var(--muted);margin:0 0 8px;letter-spacing:-.01em;}
 /* Modern typography / controls */
 .stButton > button,  .stButton > button {
     font-family: var(--app-font) !important;
@@ -131,9 +157,84 @@ DB_PATH = secret('SQLITE_PATH', _default_db_path)
 
 CATEGORY_OPTIONS = ['현금', '금', '선진국 주식', '신흥국 주식', '선진국 채권', '신흥국 채권', '기타']
 YAHOO_HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-APP_VERSION = '15.1'
+APP_VERSION = '18.0'
 KR_API_TIMEOUT = 6
 YAHOO_API_TIMEOUT = 10
+
+# ---------- [v17] UI 헬퍼: 팔레트·톤 배너·메트릭 delta·신선도 pill·plotly 차트 ----------
+PALETTE = ['#6E8A5B','#C1795A','#7D7A4F','#4A6FA5','#A15E42','#4A4638','#8DA377','#B23B2E']
+TONES = {'info':('#4A6FA5','rgba(74,111,165,.10)'),'positive':('#6E8A5B','rgba(110,138,91,.12)'),
+         'warning':('#C1795A','rgba(193,121,90,.12)'),'critical':('#B23B2E','rgba(178,59,46,.12)')}
+
+def _tone_banner(content, tone='info'):
+    fg, bg = TONES.get(tone, TONES['info'])
+    st.markdown(f'<div style="border-left:4px solid {fg};background:{bg};border-radius:8px;padding:10px 14px;margin:6px 0;color:#3D3A2E;letter-spacing:-0.01em;">{content}</div>', unsafe_allow_html=True)
+
+def make_freshness_pill(days_old):
+    if days_old is None:    return '<span class="freshness-pill fp-fresh">⏱ 조회 이력 없음</span>'
+    if days_old == 0:       return '<span class="freshness-pill fp-ok">✅ 오늘 조회</span>'
+    if days_old < 3:        return f'<span class="freshness-pill fp-fresh">📅 {days_old}일 전</span>'
+    if days_old < 7:        return f'<span class="freshness-pill fp-stale">⚠️ {days_old}일 전 — 새로고침 권장</span>'
+    return f'<span class="freshness-pill fp-critical">🛑 {days_old}일 전 — 데이터 매우 오래됨</span>'
+
+def make_decision_card(headline, severity, action_label=None, items=None):
+    fg = {'buy':'#6E8A5B','sell':'#B23B2E','watch':'#C1795A','ok':'#4A6FA5'}.get(severity,'#4A6FA5')
+    cls = 'act-buy' if severity=='buy' else ('act-sell' if severity=='sell' else '')
+    act = f'<span class="{cls}">{action_label}</span>' if action_label else ''
+    items_html = ''.join(f'<span>· {it}</span>' for it in (items or []))
+    return f'<div class="decision-card" style="border-left:6px solid {fg};"><div class="head"><span>{headline}</span>{act}</div><div class="meta">{items_html}</div></div>'
+
+def _step_meter(steps_total, steps_done, labels=None):
+    segs = ''.join('<div class="seg ' + ('on' if i < steps_done else '') + '"></div>' for i in range(steps_total))
+    html = ['<div class="step-meter">' + segs + '</div>']
+    if labels:
+        try:
+            lbls_rendered = ''
+            for i in range(steps_total):
+                t = labels[i] if i < len(labels) else ''
+                style = 'font-weight:750;color:#6E8A5B' if i == steps_done - 1 else 'color:#8a8577'
+                lbls_rendered += f'<span style="{style};margin-right:14px;">{i+1}{t}</span>'
+            html.append(f'<div class="step-meter lbl">{lbls_rendered}</div>')
+        except Exception:
+            pass
+    return ''.join(html)
+
+def _get_prev_total():
+    eq = get_state('equity')
+    if not eq: return None
+    today_iso = date.today().isoformat()
+    valid = [e for e in eq if e.get('date') and str(e.get('date')) < today_iso]
+    if not valid: return None
+    valid.sort(key=lambda e: str(e.get('date')))
+    return float(valid[-1].get('value', 0))
+
+try:
+    import plotly.graph_objects as _go
+    _HAS_PLOTLY = True
+except Exception:
+    _HAS_PLOTLY = False
+
+def _plotly_bar_pct(df, x_col, y_col, palette_idx=0, height=300):
+    if not _HAS_PLOTLY or df is None or df.empty: return None
+    color = PALETTE[palette_idx % len(PALETTE)]
+    fig = _go.Figure(_go.Bar(x=df[x_col], y=df[y_col], marker_color=color,
+                             hovertemplate='%{x}<br>%{y:,.1f}%<extra>%{fullData.name}</extra>'))
+    fig.update_layout(height=height, margin=dict(l=10,r=10,t=30,b=10),
+                      paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                      font=dict(family='Apple SD Gothic Neo, Malgun Gothic, sans-serif'),
+                      yaxis=dict(ticksuffix='%'))
+    return fig
+
+def _plotly_pie(df, label_col, value_col, height=320):
+    if not _HAS_PLOTLY or df is None or df.empty: return None
+    fig = _go.Figure(_go.Pie(labels=df[label_col], values=df[value_col],
+                              marker=dict(colors=PALETTE), hole=0.45,
+                              hovertemplate='%{label}<br>%{value:,.0f}원 (%{percent})<extra></extra>'))
+    fig.update_layout(height=height, margin=dict(l=10,r=10,t=30,b=10),
+                      paper_bgcolor='rgba(0,0,0,0)', showlegend=True,
+                      legend=dict(orientation='h', yanchor='bottom', y=-.18))
+    return fig
+
 
 # ---------- Safe data normalization ----------
 def safe_prices(value, fallback=None):
@@ -186,16 +287,6 @@ def clean_records(df):
 # 스펙 파일이 없으면 strategy_engine.DEFAULT_SPECS 로 자동 생성되고,
 # 이후 전략 추가/수정은 설정 페이지 또는 스펙 파일 편집만으로 가능하다 (코드 수정 불필요).
 SPEC_PATH = str(Path(DB_PATH).parent / 'strategy_spec.json')
-_repo_spec_path = ROOT / 'strategy_spec.json'
-if not Path(SPEC_PATH).exists() and _repo_spec_path.exists():
-    # 배포 저장소(예: GitHub)에 strategy_spec.json을 같이 올려두면(README_DEPLOY.txt 안내대로)
-    # 최초 1회 그 내용으로 홈 디렉터리 사본을 만든다. 이후로는 재배포로 사라지지 않는 홈
-    # 디렉터리 사본만 읽고 쓴다(DB_PATH와 동일한 지속성 원칙). 이 시딩이 없으면 저장소에
-    # strategy_spec.json을 올려도 앱이 절대 읽지 않고 항상 내장 기본 템플릿만 쓰게 된다.
-    try:
-        Path(SPEC_PATH).write_text(_repo_spec_path.read_text(encoding='utf-8'), encoding='utf-8')
-    except Exception:
-        pass
 se.ensure_spec_file(SPEC_PATH)
 
 def get_specs():
@@ -304,6 +395,69 @@ def put_state(k, v):
 # "캐시 삭제" 버튼을 눌렀는데 Yahoo 결과가 다시 나오는 문제는
 # st.cache_data와 SQLite 캐시가 서로 다른 층이기 때문에 발생할 수 있다.
 PRICE_CACHE_TTL_SECONDS = 60 * 60 * 24 * 30
+
+# ---------- [v16] 매일 쓰는 4가지 마찰 해소 (안정성 패치) ----------
+# 1) sqlite 잠금 race: Streamlit rerun은 별도 스레드에서 페이지를 실행할 수 있어 connect엔 check_same_thread=False가 안전하고,
+#    빠른 연속 rerun으로 "database is locked" 같은 일시적 lock이 뜨는 케이스를 1회 자동 재시도로 흡수한다.
+#    기존 호출자(13곳)는 그대로 둠 — 새 헬퍼는 곧장 호환되며 stage-by-stage로 치환된다.
+from contextlib import contextmanager
+import time as _time
+@contextmanager
+def connect_db():
+    try:
+        con = sqlite3.connect(DB_PATH, timeout=15, check_same_thread=False)
+        yield con
+        try: con.commit()
+        except Exception: pass
+        con.close()
+        return
+    except sqlite3.OperationalError as _e:
+        if 'locked' in str(_e).lower():
+            _time.sleep(0.4)
+            con = sqlite3.connect(DB_PATH, timeout=15, check_same_thread=False)
+            try:
+                yield con
+                con.commit()
+            finally:
+                try: con.close()
+                except Exception: pass
+            return
+        raise
+
+# 4) 광범위 except Exception 분류 — 빈 df는 silent, 손상은 메시지
+# _safe_call은 "실패해도 치명적이지 않은 호출"에만 사용한다. 결과는 항상 bool.
+_LAST_WARN_TS = {}
+def _safe_call(label, fn):
+    """v16 — except Exception 의 일관성 있는 대체.
+    - label: 어느 호출인지 식별 (콘솔/배너 확인용)
+    - fn: 실행할 zero-arg 호출 또는 no-arg callable
+    - Ok False: fn 이 None / pd.isna / '0' / empty string 등을 '값이 없음'으로 정상 처리한 경우
+    - Err True: 위 미만 — 콘솔에 상세 기록, 화면에는 비침묵(첫 1회만)
+    단순 의도: '조용히 무시'도 '엄격히 죽음'도 사용자 둘 다 불만이라, **첫 실패만 가볍게 알려주고 나머지는 조용히** 한다.
+    """
+    try:
+        out = fn() if callable(fn) else fn
+        if out is None: return None, False
+        try:
+            if pd.isna(out): return None, False
+        except (TypeError, ValueError): pass
+        if isinstance(out, pd.DataFrame) and out.empty: return None, False
+        if isinstance(out, (list, tuple, dict, str)) and len(out) == 0: return None, False
+        return out, False
+    except Exception as e:
+        import traceback
+        ts = _time.time()
+        if _LAST_WARN_TS.get(label, 0) < ts - 30:
+            _LAST_WARN_TS[label] = ts
+            print(f'[safe_call:{label}] {type(e).__name__}: {e}')
+        return None, True
+
+def _since_last_fetch():
+    """[v16] 가격 캐시/마지막 조회 신선도를 일 단위로 표시."""
+    d = st.session_state.get('last_run_date')
+    if not d: return None
+    try: return (date.today() - pd.Timestamp(d).date()).days
+    except Exception: return None
 
 def _cache_market_ticker(market, ticker):
     market = str(market or 'KR').upper(); ticker = str(ticker).strip()
@@ -1647,6 +1801,18 @@ with st.sidebar:
     device_mode = st.radio('화면 모드', ['자동(반응형)', '💻 PC', '📱 모바일'], index=0, key='device_mode', horizontal=True)
     dark_mode = st.toggle('🌙 다크모드', value=False, key='dark_mode', help='눈이 편한 어두운 테마로 전환합니다.')
     st.caption('자동주문 없음 · 지정일 실행만 저장')
+    # [v17] 사이드바 미니 메트릭 — 활성 전략별 한도 잔여
+    try:
+        _mini = ''
+        for _sc in [c for c in get_strategies() if c.get('active', True)]:
+            _lim = n(_sc.get('annual_limit', 0))
+            _ytd = ytd_contribution(_sc['code']) if _lim > 0 else 0
+            _remain = _lim - _ytd if _lim > 0 else None
+            _tip = '한도 추적 안 함' if _remain is None else (f'잔여 {w(_remain)}' + (' ⚠️ 초과' if _remain < 0 else ''))
+            _mini += f'<div style="background:rgba(255,255,255,.55);border:1px solid var(--border);border-radius:8px;padding:6px 9px;margin:5px 0;font-size:.74rem;color:var(--muted);"><b style="color:var(--text);font-size:.85rem;">{_sc["code"]}</b> · {_tip}</div>'
+        if _mini: st.markdown(_mini, unsafe_allow_html=True)
+    except Exception:
+        pass
 
 # '자동' 모드도 CSS 미디어쿼리로 실제 폰 브라우저 폭에서는 반응형으로 줄어든다.
 # '📱 모바일'을 명시적으로 고르면 PC 화면에서도 강제로 모바일 레이아웃(카드형 목록 등)을 미리 볼 수 있다.
@@ -1825,7 +1991,28 @@ if page == '🔄 리밸런싱 실행':
     _sc1.metric('활성 전략 총자산', w(_g))
     _sc2.metric('마지막 히스토리 저장', info[0] if info else '없음')
     _sc3.metric('이번 달 말까지', f'{calendar.monthrange(date.today().year, date.today().month)[1] - date.today().day}일')
-    st.info('종가를 불러온 뒤 저장 버튼을 눌러야 히스토리(모든 전략 구성 스냅샷)가 저장됩니다. 미국 상장 종목은 선택한 조회일자의 Yahoo 종가와 같은 날짜의 USD/KRW 환율로 원화 환산합니다.')
+    # [v17①] 전기 대비 총자산 변화 캡션 (고정 색 토큰 사용)
+    try:
+        _prev_t = _get_prev_total()
+        if _prev_t and _prev_t > 0 and _g:
+            _dp = (_g - _prev_t) / _prev_t * 100.0
+            _col = '#6E8A5B' if _dp >= 0 else '#B23B2E'
+            _arrow = '▲' if _dp >= 0 else '▼'
+            st.markdown(f'<div style="font-size:.82rem;color:{_col};font-weight:650;letter-spacing:-0.01em;margin:-2px 0 4px;">{_arrow} 저번달 대비 {_g - _prev_t:+,.0f}원 ({_dp:+.2f}%)</div>', unsafe_allow_html=True)
+    except Exception:
+        pass
+    # [v17②] 가격 신선도 pill (4단계 톤 — immediate/info/warn/critical)
+    st.markdown(make_freshness_pill(_since_last_fetch()), unsafe_allow_html=True)
+    _fresh = _since_last_fetch()
+    if _fresh is not None and _fresh >= 3:
+        _tone_banner(f'<b>{_fresh}일 경과</b> · 오래된 가격으로 저장하면 히스토리가 왜곡됩니다. 아래에서 🔄 새로고침 후 저장하세요.', tone='warning')
+    _tone_banner('종가를 불러온 뒤 저장 버튼을 눌러야 히스토리(모든 전략 구성 스냅샷)가 저장됩니다. 미국 상장 종목은 선택한 조회일자의 Yahoo 종가와 같은 날짜의 USD/KRW 환율로 원화 환산합니다.', tone='info')
+    # [v17③] step meter — 월말 워크플로우 시각화
+    _step_done = 0
+    if _fresh is not None and _fresh < 3: _step_done = 1
+    if st.session_state.get('price_fetch_attempted'): _step_done = max(_step_done, 2)
+    if info and info[1] < 25: _step_done = max(_step_done, 3)
+    st.markdown(_step_meter(4, _step_done, ['. 가격 조회', '. 리밸런싱 계획', '. 히스토리 저장', '. 다음 달']), unsafe_allow_html=True)
     if st.session_state.get('price_fetch_attempted') and usd_krw_rate_missing(ap_assets, run_date):
         st.warning('미국 상장 종목의 선택 조회일자 USD/KRW 환율을 가져오지 못했습니다. 해당 종목 평가액이 0으로 계산될 수 있습니다.')
 
@@ -1915,7 +2102,50 @@ if page == '🔄 리밸런싱 실행':
     failed_idx = st.session_state.get('failed_tickers', [])
     failed_idx = [i for i in failed_idx if i in assets.index]
     if failed_idx:
-        with st.expander(f'⚠️ 종가 조회 실패/데이터 부족 {len(failed_idx)}건', expanded=False):
+        # [v16] 일괄 재시도 — 8개 빨간 줄일 때 8번 누르던 마찰 해소
+        _ticker_labels = ', '.join(str(assets.at[i, 'ticker']) for i in failed_idx[:8])
+        if len(failed_idx) > 8: _ticker_labels += f' 외 {len(failed_idx) - 8}개'
+        st.error(f'🛑 가격 조회 실패 {len(failed_idx)}종목 — {_ticker_labels}')
+        if st.button('🔁 실패 종목 전체 재시도 (캐시 초기화 + 재조회)', key='v16_retry_all_failed', type='primary', width='stretch'):
+            _retry_ok, _retry_err, _still_failed = 0, [], []
+            try: st.cache_data.clear()
+            except Exception: pass
+            try: clear_all_price_caches()
+            except Exception: pass
+            for _i in failed_idx:
+                _t = str(assets.at[_i, 'ticker']).strip()
+                _mkt = assets.at[_i, 'market'] or 'KR'
+                try:
+                    if _mkt == 'US':
+                        try:
+                            st.session_state.run_fx_rate = get_usd_krw_rate(run_date.isoformat(), force_refresh=True)
+                        except Exception: pass
+                        _daydf = fetch_price_day(_mkt, source, _t, run_date.isoformat(), force_refresh=True)
+                    else:
+                        _daydf = fetch_price_day(_mkt, source, _t, run_date.isoformat(), force_refresh=True)
+                    _row = _daydf.iloc[-1]
+                    assets.at[_i, 'close'] = float(_row['close'])
+                    if 'adjclose' in _row and n(_row.get('adjclose')) > 0:
+                        assets.at[_i, 'adjclose'] = float(n(_row['adjclose']))
+                    assets.at[_i, 'last_fetch_date'] = run_date.isoformat()
+                    assets.at[_i, 'price_source'] = source
+                    _monthly = fetch_price_monthly(_mkt, source, _t, run_date.isoformat(), force_refresh=True)
+                    _prices = _monthly.sort_values('date')['close'].tolist() if not _monthly.empty else [float(_row['close'])]
+                    assets.at[_i, 'prices'] = _prices
+                    if len(_prices) >= 10:
+                        _retry_ok += 1
+                    else:
+                        _retry_err.append(f'{_t}: {_prices}월만 확보')
+                        _still_failed.append(_i)
+                except Exception as _e:
+                    _retry_err.append(f'{_t}: {str(_e)[:80]}')
+                    _still_failed.append(_i)
+            st.session_state.assets = assets; put_state('assets', assets.to_dict('records'))
+            st.session_state.failed_tickers = _still_failed
+            if _retry_ok: st.success(f'✅ {_retry_ok}종목 복구 — 실패 잔여 {len(_still_failed)}건')
+            if _retry_err: st.warning(' / '.join(_retry_err[:5]))
+            st.rerun()
+        with st.expander(f'⚠️ 종가 조회 실패/데이터 부족 {len(failed_idx)}건 (개별 수동 입력 또는 행 단위 재시도)', expanded=False):
             st.caption('상세 오류와 원인을 확인할 수 있습니다. 수동 종가 입력은 자동 조회가 끝내 실패할 때의 비상 수단입니다.')
             for i in failed_idx:
                 a = assets.loc[i]
@@ -2261,7 +2491,16 @@ elif page == '🏠 대시보드':
                         render_target_weight_bar(r['현재비중'], r['목표비중'])
         st.divider(); st.markdown('#### 전략별 비중 (전체 자산 대비)')
         by_strategy = snap_df.groupby('전략')['현재금액'].sum()
-        if grand_total > 0: st.bar_chart((by_strategy / grand_total * 100).rename('비중(%)'))
+        if grand_total > 0:
+            _b = (by_strategy / grand_total * 100).rename('비중(%)').round(2)
+            if MOBILE or not _HAS_PLOTLY:
+                st.bar_chart(_b)
+            else:
+                _pdf = _b.reset_index()
+                _pdf.columns = ['전략','비중(%)']
+                _pf = _plotly_bar_pct(_pdf, '전략', '비중(%)', palette_idx=0)
+                if _pf is not None: st.plotly_chart(_pf, use_container_width=True)
+                else: st.bar_chart(_b)
 
         st.divider(); st.markdown('#### 전체 전략 합산 · 자산분류별 분포')
         cat_df = compute_category_breakdown(assets)
@@ -2287,7 +2526,13 @@ elif page == '🏠 대시보드':
             disp_cat['목표비중'] = disp_cat['목표비중'].map(lambda x: f'{x:.1f}%')
             disp_cat['괴리(%p)'] = disp_cat['괴리(%p)'].map(lambda x: f'{x:+.1f}')
             st.dataframe(disp_cat, width='stretch', hide_index=True)
-            st.bar_chart(cat_df.set_index('분류')['비중'])
+            _nonzero = cat_df[cat_df['비중'] > 0] if '비중' in cat_df.columns else cat_df
+            if MOBILE or not _HAS_PLOTLY or _nonzero.empty:
+                st.bar_chart(cat_df.set_index('분류')['비중'])
+            else:
+                _pf = _plotly_pie(_nonzero, '분류', '비중')
+                if _pf is not None: st.plotly_chart(_pf, use_container_width=True)
+                else: st.bar_chart(cat_df.set_index('분류')['비중'])
             worst = show.reindex(show['괴리(%p)'].abs().sort_values(ascending=False).index).head(3)
             flagged = worst[worst['괴리(%p)'].abs() >= 3]
             if not flagged.empty:
@@ -2430,22 +2675,73 @@ elif page == '⚙️ 설정':
             st.progress(min(1.0, max(0.0, ytd / edit_limit)))
             st.caption('입출금 원장에서 이 전략으로 태그된 입금(성과 비교 페이지)만 합산됩니다.')
 
+    # [v18] 행 선택/삭제/복사(전략 간)/붙여넣기/되돌리기 + UX 보너스
+    ss = st.session_state
+    UNDO_LIMIT = 10
+    ss.setdefault('_v18_undo_stack', [])
+    ss.setdefault('_v18_clipboard', [])
+    ss.setdefault('_v18_clipboard_origin', None)
+
+    def _push_undo(label):
+        try:
+            snap = json.loads(json.dumps([dict(r) for r in ss.assets.to_dict('records')], default=str))
+        except Exception:
+            return
+        stk = ss._v18_undo_stack
+        stk.append((snap, label))
+        if len(stk) > UNDO_LIMIT:
+            del stk[0:len(stk) - UNDO_LIMIT]
+
+    def _undo_one():
+        stk = ss._v18_undo_stack
+        if not stk:
+            st.toast('되돌릴 작업이 없습니다.')
+            return
+        snap, label = stk.pop()
+        try:
+            for r in snap:
+                if 'prices' not in r or r['prices'] is None:
+                    r['prices'] = []
+                elif isinstance(r['prices'], str):
+                    try:
+                        r['prices'] = json.loads(r['prices'])
+                    except Exception:
+                        r['prices'] = []
+            put_state('assets', snap)
+            ss.assets = clean_records(pd.DataFrame(snap))
+            toast('되돌렸습니다: ' + label)
+        except Exception as e:
+            st.error('되돌리기 실패: ' + str(e))
+
+    # 솔직한 단축키 안내 (Streamlit grid는 OS 키 직접 캡처 불가능)
+    st.markdown(
+        "<div class='kb-hint'><b>단축키 안내</b> — Streamlit st.data_editor는 OS 키 입력 직접 인지가 불가능합니다. "
+        "<kbd>Ctrl</kbd>+<kbd>D</kbd> 삭제, <kbd>Ctrl</kbd>+<kbd>C</kbd> 복사, "
+        "<kbd>Ctrl</kbd>+<kbd>V</kbd> 붙여넣기(전략 간), <kbd>Ctrl</kbd>+<kbd>Z</kbd> 되돌리기 — "
+        "아래 툴바 버튼으로 동일한 효과가 동작합니다.</div>",
+        unsafe_allow_html=True)
+    if not subset.empty:
+        st.markdown(f"<span class='undo-stack-pill'>↩ 되돌리기 {len(ss._v18_undo_stack)}/{UNDO_LIMIT}스텝</span>", unsafe_allow_html=True)
+
     disp = pd.DataFrame({
+        '선택': False,
         '시장': subset['market'],
-        '상품명': subset.apply(lambda r: f"{r['name']} ({r['ticker']})" if r['name'] else str(r['ticker']), axis=1),
+        '티커': subset['ticker'],
+        '상품명': subset['name'].fillna(''),
         '보유수량': subset['shares'].round(0),
         '종가': subset['close'].round(0),
         '현재평가액': subset.apply(asset_value, axis=1).round(0),
-        '마지막조회': subset['last_fetch_date'].fillna(''),
-        '출처': subset['price_source'].fillna(''),
+        '마지막조회': subset['last_fetch_date'].fillna('') if 'last_fetch_date' in subset.columns else '',
+        '출처': subset['price_source'].fillna('') if 'price_source' in subset.columns else '',
         '목표비중': pd.to_numeric(subset['target_pct'], errors='coerce').fillna(0.0),
         '현재비중': subset.apply(lambda r: (asset_value(r) / strat_total * 100 if strat_total > 0 else 0.0), axis=1),
         '분류': subset['category'],
     })
     disp['괴리(%)'] = disp['현재비중'] - disp['목표비중']
-    disp = disp[['시장', '상품명', '보유수량', '종가', '현재평가액', '마지막조회', '출처', '목표비중', '현재비중', '괴리(%)', '분류']]
-
-    st.caption('상품명 옆 괄호가 티커입니다. 티커를 바꾸려면 행을 삭제하고 아래 검색으로 다시 추가하세요. 현금 행은 "보유수량"에 원화 금액을 직접 입력하세요(종가=1). 현재평가액은 종가×보유수량으로 자동 계산됩니다.')
+    disp.index = subset.index.tolist()
+    cols_pc = ['선택','시장','티커','상품명','보유수량','종가','현재평가액','마지막조회','출처','목표비중','현재비중','괴리(%)','분류']
+    cols_mob = ['선택','티커','상품명','현재평가액','현재비중','괴리(%)','분류']
+    disp_show = disp[cols_mob] if MOBILE else disp[cols_pc]
 
     if MOBILE:
         for _, r in subset.iterrows():
@@ -2457,15 +2753,18 @@ elif page == '⚙️ 설정':
                 f"현재 {cur_pct:.1f}% / 목표 {tgt_pct:.1f}% (괴리 {gap:+.1f}%p)",
                 f"평가액 {num0(val)}원 · 종가 {num0(r['close'])} · 보유수량 {num0(r['shares'])}",
             ], tone=tone)
-        editor_ctx = st.expander('표로 편집하기 (보유수량·목표비중·분류 수정)', expanded=False)
+        editor_ctx = st.expander('표로 편집하기 (체크 후 버튼으로 삭제·복사)', expanded=False)
     else:
         editor_ctx = st.container()
 
     with editor_ctx:
         edited = st.data_editor(
-            disp, num_rows='dynamic', width='stretch', hide_index=True,
-            disabled=['종가', '현재평가액', '마지막조회', '출처', '현재비중', '괴리(%)'],
+            disp_show, num_rows='dynamic', width='stretch', hide_index=True,
+            disabled=['티커','종가','현재평가액','마지막조회','출처','현재비중','괴리(%)'],
+            key=f"v18_de_{chosen}",
             column_config={
+                '선택': st.column_config.CheckboxColumn('☑', width='small', help='이 행을 선택 (복사·삭제 대상)'),
+                '티커': st.column_config.TextColumn('티커', disabled=True),
                 '보유수량': st.column_config.NumberColumn('보유수량', format='localized', step=1),
                 '종가': st.column_config.NumberColumn('종가', format='localized'),
                 '현재평가액': st.column_config.NumberColumn('현재평가액(원)', format='localized'),
@@ -2476,28 +2775,196 @@ elif page == '⚙️ 설정':
             },
         )
 
-    asset_sum = pd.to_numeric(edited['목표비중'], errors='coerce').fillna(0.0).sum()
+        if MOBILE:
+            _mopts = subset['ticker'].tolist()
+            _sel_m = st.multiselect('삭제·복사할 티커 선택', _mopts, key=f"v18_msel_{chosen}", label_visibility='visible')
+        else:
+            _sel_m = []
+
+        def _picks():
+            out = []
+            try:
+                if edited is not None and not edited.empty and '선택' in edited.columns:
+                    for _idx, _row in edited.iterrows():
+                        if not bool(_row.get('선택', False)):
+                            continue
+                        try:
+                            sidx = int(_idx)
+                        except Exception:
+                            continue
+                        if sidx in subset.index:
+                            out.append(dict(subset.loc[sidx]))
+            except Exception:
+                pass
+            try:
+                if _sel_m:
+                    for _t in _sel_m:
+                        mm = subset[subset['ticker'] == _t]
+                        if not mm.empty:
+                            out.append(dict(mm.iloc[0]))
+            except Exception:
+                pass
+            return out
+
+        _picked = _picks()
+
+        # 단축키 안내 툴바 (실제 캡처 불가 - 정직 표시)
+        st.markdown(
+            "<div class='editor-tooltip'><span class='label'>⌨ 행 편집</span>"
+            "<kbd>Ctrl</kbd>+<kbd>D</kbd> 삭제 · <kbd>Ctrl</kbd>+<kbd>C</kbd> 복사 · "
+            "<kbd>Ctrl</kbd>+<kbd>V</kbd> 붙여넣기(전략 간) · <kbd>Ctrl</kbd>+<kbd>Z</kbd> 되돌리기 — "
+            "<span style='color:#B23B2E;font-weight:650'>단축키 직접 인식은 불가</span>, 아래 버튼으로 동일한 효과</div>",
+            unsafe_allow_html=True)
+
+        _tc1, _tc2, _tc3, _tc4, _tc5, _tc6 = st.columns([1.4, 1.5, 1.0, 1.5, 1.4, 1.1])
+        with _tc1:
+            _codes = [c['code'] for c in get_strategies()]
+            _tgt_opts = list(_codes)
+            if ss._v18_clipboard_origin and ss._v18_clipboard_origin != chosen and ss._v18_clipboard_origin in _codes:
+                _tgt_opts = [chosen, ss._v18_clipboard_origin] + [c for c in _codes if c not in (chosen, ss._v18_clipboard_origin)]
+            _tgt = st.selectbox('붙여넣기 대상 전략', _tgt_opts, key=f"v18_paste_tgt_{chosen}")
+        with _tc2:
+            if st.button('📋 복사 (Ctrl+C)', key=f"v18_copy_{chosen}", help='선택한 종목을 임시 보관 (다른 전략에 붙여넣기 가능)'):
+                if not _picked:
+                    st.toast('먼저 행을 선택하세요.')
+                else:
+                    ss._v18_clipboard = json.loads(json.dumps([dict(r) for r in _picked], default=str))
+                    ss._v18_clipboard_origin = chosen
+                    toast(f'{len(_picked)}개 종목 복사 완료')
+        with _tc3:
+            if st.button('📥 붙여넣기', key=f"v18_paste_{chosen}", help=f'[{_tgt}]에 보관 {len(ss._v18_clipboard)}개 붙여넣기'):
+                if not ss._v18_clipboard:
+                    st.toast('먼저 📋 복사로 종목을 선택하세요.')
+                else:
+                    _push_undo('붙여넣기 ' + _tgt)
+                    _added = 0; _dup = []
+                    _existing = set(ss.assets[ss.assets['strategy'] == _tgt]['ticker'].astype(str).tolist())
+                    for _r in ss._v18_clipboard:
+                        _t = str(_r.get('ticker', '')).strip()
+                        if not _t or _t in _existing:
+                            if _t:
+                                _dup.append(_t)
+                            continue
+                        _nr = {
+                            'id': str(len(ss.assets) + 1), 'strategy': _tgt, 'ticker': _t,
+                            'name': str(_r.get('name', _t)), 'market': str(_r.get('market', 'KR')),
+                            'role': str(_r.get('role', '붙여넣기')),
+                            'target_pct': n(_r.get('target_pct', 0.0)),
+                            'shares': n(_r.get('shares', 0.0)),
+                            'close': n(_r.get('close', 0.0)),
+                            'prices': _r.get('prices', []) or [],
+                            'signal_ticker': str(_r.get('signal_ticker', _t)),
+                            'category': str(_r.get('category', '기타')),
+                            'kind': str(_r.get('kind', '')),
+                            'last_fetch_date': '', 'price_source': '',
+                        }
+                        try:
+                            ss.assets = pd.concat([ss.assets, pd.DataFrame([_nr])], ignore_index=True)
+                            _existing.add(_t); _added += 1
+                        except Exception:
+                            pass
+                    ss.assets = clean_records(ss.assets)
+                    put_state('assets', ss.assets.to_dict('records'))
+                    if _added:
+                        toast(f'{_tgt} 전략에 {_added}개 붙여넣기 완료')
+                    if _dup:
+                        st.warning('중복으로 건너뜀: ' + ', '.join(_dup[:5]) + (f' 외 {len(_dup)-5}개' if len(_dup) > 5 else ''))
+                    st.rerun()
+        with _tc4:
+            if st.button(f'🗑 선택 {len(_picked)}개 삭제 + 비중 재분배', key=f"v18_del_{chosen}", type='primary',
+                         help='남은 종목에 삭제 비중 균등 분배'):
+                if not _picked:
+                    st.toast('먼저 삭제할 행을 체크하세요.')
+                else:
+                    _push_undo('삭제 ' + str(len(_picked)) + '개')
+                    _to_del = [str(x.get('ticker', '')) for x in _picked if str(x.get('ticker', ''))]
+                    _mask = ss.assets['strategy'].eq(chosen) & ss.assets['ticker'].astype(str).isin(_to_del)
+                    _delw = float(pd.to_numeric(ss.assets.loc[_mask, 'target_pct'], errors='coerce').fillna(0).sum())
+                    _keep = ss.assets['strategy'].eq(chosen) & (~ss.assets['ticker'].astype(str).isin(_to_del)) & (~ss.assets['ticker'].astype(str).eq('CASH'))
+                    _nk = int(_keep.sum())
+                    if _nk > 0 and _delw > 0:
+                        _pp = _delw / _nk
+                        ss.assets.loc[_keep, 'target_pct'] = (
+                            pd.to_numeric(ss.assets.loc[_keep, 'target_pct'], errors='coerce').fillna(0) + _pp
+                        ).round(2)
+                    ss.assets = ss.assets.loc[~_mask].reset_index(drop=True)
+                    ss.assets = clean_records(ss.assets)
+                    put_state('assets', ss.assets.to_dict('records'))
+                    toast(f'{len(_to_del)}개 삭제 + 비중 {round(_delw,2)}% 재분배 완료')
+                    st.rerun()
+        with _tc5:
+            if st.button('+ 새 빈 행', key=f"v18_add_{chosen}", help='빈 행 1개 추가 — 검색으로 채우세요'):
+                _push_undo('빈 행 추가')
+                _nid = str(len(ss.assets) + 1)
+                _blank = {
+                    'id': _nid, 'strategy': chosen,
+                    'ticker': f'NEW{int(pd.Timestamp.now().timestamp()) % 100000}',
+                    'name': '(새 종목)', 'market': 'KR', 'role': '사용자 추가',
+                    'target_pct': 0.0, 'shares': 0.0, 'close': 0.0, 'prices': [],
+                    'signal_ticker': '', 'category': '기타',
+                }
+                try:
+                    ss.assets = pd.concat([ss.assets, pd.DataFrame([_blank])], ignore_index=True)
+                    ss.assets = clean_records(ss.assets)
+                    put_state('assets', ss.assets.to_dict('records'))
+                    toast('빈 행 추가됨')
+                    st.rerun()
+                except Exception as e:
+                    st.error('빈 행 추가 실패: ' + str(e))
+        with _tc6:
+            if st.button(f'↩ 되돌리기 ({len(ss._v18_undo_stack)}/{UNDO_LIMIT})', key=f"v18_undo_{chosen}",
+                         help=f'마지막 작업 {UNDO_LIMIT}스텝까지 되돌리기'):
+                _undo_one()
+                st.rerun()
+
+        if not MOBILE:
+            if st.button('⬇ 행 편집 내용 저장', key=f"v18_apply_{chosen}", type='primary',
+                         help='보유수량·목표비중·분류 변경분을 DB에 반영'):
+                _push_undo('표 저장')
+                _n = 0
+                for _idx, _row in edited.iterrows():
+                    try:
+                        sidx = int(_idx)
+                    except Exception:
+                        continue
+                    if sidx not in ss.assets.index:
+                        continue
+                    try:
+                        ss.assets.at[sidx, 'shares'] = float(_row.get('보유수량') or 0)
+                        ss.assets.at[sidx, 'target_pct'] = float(_row.get('목표비중') or 0)
+                        ss.assets.at[sidx, 'category'] = str(_row.get('분류') or '기타')
+                        _n += 1
+                    except Exception:
+                        pass
+                ss.assets = clean_records(ss.assets)
+                put_state('assets', ss.assets.to_dict('records'))
+                toast(f'{_n}개 행 저장 완료')
+
+        if ss._v18_clipboard:
+            st.caption(f"📋 클립보드 {len(ss._v18_clipboard)}개 보유 (출처: {ss._v18_clipboard_origin}) — 📥 붙여넣기로 꺼내세요.")
+
+        # 같은 전략 내 티커 중복 경고 배너
+        try:
+            _sd = ss.assets[ss.assets['strategy'].eq(chosen)]
+            _du = _sd.duplicated(subset=['ticker'], keep=False)
+            _dt = sorted(set(_sd[_du]['ticker'].astype(str).tolist()))
+            if _dt:
+                _more = f" 외 {len(_dt)-6}개" if len(_dt) > 6 else ""
+                st.markdown(
+                    f"<div class='dup-warn'>🚨 같은 전략 내 티커 중복: <b>{', '.join(_dt[:6])}</b>{_more} — 🗑 삭제 권장</div>",
+                    unsafe_allow_html=True)
+        except Exception:
+            pass
+
+    asset_sum = pd.to_numeric(edited['목표비중'] if not MOBILE else disp['목표비중'], errors='coerce').fillna(0.0).sum()
     if edit_dynamic:
-        st.caption(f'동적 전략: 목표비중 합계 검사를 하지 않습니다 (현재 합계 {asset_sum:.1f}%).')
-        weights_ok = True
+        st.caption(f"동적 전략: 목표비중 합계 검사 안 함 (현재 {asset_sum:.1f}%)."); weights_ok = True
     else:
         weights_ok = abs(asset_sum - 100) <= 0.05
-        if weights_ok: st.success('목표비중 합계 100% ✓ (현금 행 포함)')
-        else: st.error(f'목표비중 합계 {asset_sum:.1f}% — 현금 행을 포함해 정확히 100%가 되어야 저장됩니다.')
-
-    st.markdown('##### 🗑️ 종목 삭제')
-    st.caption('위 표에서 행을 선택해 지울 수도 있지만(선택 후 Delete 키), 모바일에서는 아래 버튼이 더 편합니다.')
-    if not subset.empty:
-        del_opts = [f"{r['name']} ({r['ticker']})" for _, r in subset.iterrows()]
-        del_pick = st.multiselect('삭제할 종목 선택', del_opts, key=f'del_pick_{chosen}')
-        if st.button('선택 종목 삭제', key=f'del_btn_{chosen}', disabled=not del_pick):
-            del_tickers = {x.rsplit(' (', 1)[1].rstrip(')') for x in del_pick}
-            assets2 = assets[~((assets['strategy'].eq(chosen)) & (assets['ticker'].isin(del_tickers)))].copy()
-            st.session_state.assets = assets2; put_state('assets', assets2.to_dict('records'))
-            st.success(f'{len(del_tickers)}개 종목을 삭제했습니다.'); toast('종목을 삭제했습니다.'); st.rerun()
-    else:
-        st.caption('삭제할 종목이 없습니다.')
-
+        if weights_ok:
+            st.success('목표비중 합계 100% ✓ (현금 행 포함)')
+        else:
+            st.error(f"목표비중 합계 {asset_sum:.1f}% — 100%가 되어야 저장됩니다.")
     if not subset.empty:
         download_link('현재 전략 구성 CSV 다운로드',
                        subset[['ticker', 'name', 'market', 'shares', 'close', 'target_pct', 'category']].to_csv(index=False),
@@ -2506,7 +2973,7 @@ elif page == '⚙️ 설정':
     st.markdown('### 종목 검색·추가 (ETF + 개별주식, 한국/미국)')
     mkt_choice = st.radio('시장', ['한국(KRX)', '미국(Yahoo)'], horizontal=True, key='mkt_choice')
     if mkt_choice == '한국(KRX)':
-        q = st.text_input('티커 또는 종목명 일부 입력', key='kr_q')
+        q = st.text_input('티커 또는 종목명 일부 입력', key='v17_action_krq')
         catalog = load_krx_universe(date.today().isoformat())
         if catalog.empty:
             err = catalog.attrs.get('error', '알 수 없는 이유로 목록을 가져오지 못했습니다.')
@@ -2532,7 +2999,7 @@ elif page == '⚙️ 설정':
             st.caption('티커 또는 종목명을 입력하면 후보가 바로 아래 나타납니다.')
         st.caption(f'KRX 목록 {len(catalog):,}개 (ETF는 이미 설정된 KRX_AUTH_KEY로 조회, 개별종목은 pykrx 보강 시도)')
     else:
-        q = st.text_input('종목명 또는 티커 입력 (예: Apple, AAPL)', key='us_q')
+        q = st.text_input('종목명 또는 티커 입력 (예: Apple, AAPL)', key='v17_search_usq')
         if st.button('검색', key='us_search') and q:
             st.session_state.us_results = search_us_symbols(q)
         results = st.session_state.get('us_results', pd.DataFrame(columns=['ticker', 'name', 'exchange']))
