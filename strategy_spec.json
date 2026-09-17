@@ -10,12 +10,12 @@
       "annual_limit": 0.0,
       "rule": "sma_filter_rebalance",
       "params": {
-        "sma_roles": [
-          "NASDAQ",
-          "EuroStoxx"
-        ],
         "sma_months": 10,
-        "quarter_end_restore": true
+        "quarter_end_restore": true,
+        "sma_tickers": [
+          "133690",
+          "245350"
+        ]
       },
       "assets": [
         {
@@ -190,7 +190,7 @@
         "threshold": -0.15,
         "normal_stock_pct": 70.0,
         "triggered_stock_pct": 85.0,
-        "stock_role": "S&P500 기준"
+        "stock_ticker": "360750"
       },
       "assets": [
         {

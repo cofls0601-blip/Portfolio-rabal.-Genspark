@@ -23,7 +23,7 @@ DEFAULT_SPECS = json.dumps({
             "description": "변형 LAA — 나스닥/유로스탁스만 10개월 SMA 필터, 이탈 시 현금화. 목표비중 복원은 분기 말에만.",
             "dynamic": False, "active": True, "annual_limit": 0.0,
             "rule": "sma_filter_rebalance",
-            "params": {"sma_roles": ["NASDAQ", "EuroStoxx"], "sma_months": 10, "quarter_end_restore": True},
+            "params": {"sma_tickers": ["133690", "245350"], "sma_months": 10, "quarter_end_restore": True},
             "assets": [
                 {"ticker": "133690", "name": "TIGER 미국나스닥100", "market": "KR", "role": "NASDAQ", "target_pct": 12.5, "category": "선진국 주식"},
                 {"ticker": "245350", "name": "TIGER 유로스탁스배당30", "market": "KR", "role": "EuroStoxx", "target_pct": 12.5, "category": "선진국 주식"},
@@ -65,7 +65,7 @@ DEFAULT_SPECS = json.dumps({
             "dynamic": False, "active": True, "annual_limit": 0.0,
             "rule": "drawdown_shift",
             "params": {"signal": {"ticker": "360750", "market": "KR", "lookback_days": 120},
-                       "threshold": -0.15, "normal_stock_pct": 70.0, "triggered_stock_pct": 85.0, "stock_role": "S&P500 기준"},
+                       "threshold": -0.15, "normal_stock_pct": 70.0, "triggered_stock_pct": 85.0, "stock_ticker": "360750"},
             "assets": [
                 {"ticker": "360750", "name": "TIGER 미국S&P500", "market": "KR", "role": "S&P500 기준", "target_pct": 70.0, "category": "선진국 주식"},
                 {"ticker": "153130", "name": "KODEX 단기채권", "market": "KR", "role": "현금성", "target_pct": 30.0, "category": "현금"}
@@ -125,6 +125,13 @@ def _n(v, default=0.0):
         return default
 
 
+def _norm_ticker(t):
+    """한국 상장코드는 항상 6자리다. 규칙 설정 화면에 사용자가 '69500'처럼 앞자리 0을
+    빼고 입력해도 실제 보유 종목 티커('069500')와 매칭되도록 양쪽을 같은 형식으로 맞춘다."""
+    t = str(t).strip()
+    return t.zfill(6) if t.isdigit() else t.upper()
+
+
 def _pf(x):
     return f'{x * 100:.2f}%'
 
@@ -160,8 +167,8 @@ RULE_LABELS = {
 RULE_UI_SCHEMA = {
     'static': [],
     'sma_filter_rebalance': [
-        {'path': ['sma_roles'], 'label': 'SMA를 적용할 역할', 'type': 'csv_list', 'default': [],
-         'help': '쉼표로 구분합니다. 예: NASDAQ, EuroStoxx'},
+        {'path': ['sma_tickers'], 'label': 'SMA를 적용할 티커', 'type': 'csv_list', 'default': [],
+         'help': 'SMA 상회/하회를 볼 실제 보유 종목의 티커를 쉼표로 구분해 입력하세요(이 전략에 이미 들어있는 종목이어야 합니다). 예: 133690, 245350'},
         {'path': ['sma_months'], 'label': '이동평균 기간(개월)', 'type': 'int', 'default': 10, 'min': 1, 'max': 60, 'step': 1},
         {'path': ['quarter_end_restore'], 'label': '분기말에 목표비중으로 복원', 'type': 'bool', 'default': True},
     ],
@@ -186,7 +193,8 @@ RULE_UI_SCHEMA = {
         {'path': ['threshold'], 'label': '비중 전환 발동 하락률(%)', 'type': 'fraction_pct', 'default': -0.15, 'min': -90.0, 'max': 0.0, 'step': 1.0},
         {'path': ['normal_stock_pct'], 'label': '평상시 주식비중(%)', 'type': 'float', 'default': 70.0, 'min': 0.0, 'max': 100.0, 'step': 1.0},
         {'path': ['triggered_stock_pct'], 'label': '발동 시 주식비중(%)', 'type': 'float', 'default': 85.0, 'min': 0.0, 'max': 100.0, 'step': 1.0},
-        {'path': ['stock_role'], 'label': '주식 자산 역할명', 'type': 'text', 'default': 'S&P500 기준'},
+        {'path': ['stock_ticker'], 'label': '주식 자산 티커', 'type': 'text', 'default': '360750',
+         'help': '이 전략에서 주식 역할을 하는 종목의 실제 티커(이미 보유 중인 종목이어야 합니다).'},
     ],
     'hold': [
         {'path': ['hold_note'], 'label': '리밸런싱 메모', 'type': 'text', 'default': '매매 없음(연 1회만 허용)'},
@@ -317,11 +325,14 @@ def rule_sma_filter_rebalance(spec, vdf, ctx):
     laa, cash_row, cash_cur = _split_cash(sub_all)
     total = laa['현재금액'].sum() + cash_cur
     cash_pct = _n(cash_row['목표%'].sum())
-    sma_roles = params.get('sma_roles', [])
+    # sma_tickers(신규, 실제 티커 매칭)가 있으면 그걸 쓰고, 없으면 구버전 sma_roles(역할명 텍스트 매칭)로
+    # 동작한다 — 전략 규칙 설정 화면에서 다시 저장하기 전까지 기존 설정이 조용히 깨지지 않게 하기 위함.
+    sma_tickers = set(_norm_ticker(t) for t in (params.get('sma_tickers') or []))
+    sma_roles_legacy = set(params.get('sma_roles') or [])
     quarter_end = bool(ctx.get('quarter_end', False))
     rows = []
     for _, r in laa.iterrows():
-        filtered = r['role'] in sma_roles
+        filtered = (_norm_ticker(r['티커']) in sma_tickers) or (not sma_tickers and r['role'] in sma_roles_legacy)
         breached = filtered and r['SMA 위'] == 'NO'
         if breached:
             cash_pct += _n(r['목표%'])
@@ -414,10 +425,14 @@ def rule_drawdown_shift(spec, vdf, ctx):
     threshold = float(params.get('threshold', -0.15))
     triggered = dd is not None and dd <= threshold
     stock_pct = float(params.get('triggered_stock_pct', 85.0)) if triggered else float(params.get('normal_stock_pct', 70.0))
-    stock_role = params.get('stock_role')
+    stock_ticker = params.get('stock_ticker')
+    stock_role_legacy = params.get('stock_role')
     rows = []
     for _, r in sub_all.iterrows():
-        is_stock = r['role'] == stock_role
+        if stock_ticker:
+            is_stock = _norm_ticker(r['티커']) == _norm_ticker(stock_ticker)
+        else:
+            is_stock = r['role'] == stock_role_legacy
         tgt = total * (stock_pct if is_stock else 100 - stock_pct) / 100
         if is_stock:
             note = (f'트리거 발동(고점대비 {_pf(dd)}) → 현금 절반 투입' if triggered else
